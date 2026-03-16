@@ -1,0 +1,149 @@
+# Workspace-level commands for managing multiple repos
+
+set shell := ["bash", "-cu"]
+
+# List all repos and their type
+list:
+    @for d in */; do \
+        if [ -d "$d/.bare" ]; then \
+            echo "✓ $d (bare+worktrees)"; \
+        elif [[ "$d" == *@worktrees/ ]]; then \
+            echo "○ $d (legacy @worktrees)"; \
+        elif [ -d "$d/.git" ]; then \
+            echo "○ $d (standard clone)"; \
+        fi \
+    done
+
+# Git status across all repos (shows uncommitted work)
+status:
+    #!/usr/bin/env bash
+    set -eu
+    for d in */; do
+        if [ -d "$d/.bare" ]; then
+            for w in "$d"*/; do
+                [ -d "$w/.git" ] || continue
+                output=$(cd "$w" && git status -s)
+                if [ -n "$output" ]; then
+                    echo -e "\n$w"
+                    echo "$output"
+                fi
+            done
+        elif [ -d "$d/.git" ]; then
+            output=$(cd "$d" && git status -s)
+            if [ -n "$output" ]; then
+                echo -e "\n$d"
+                echo "$output"
+            fi
+        fi
+    done
+
+# List all worktrees across all repos
+worktrees:
+    #!/usr/bin/env bash
+    set -eu
+    for d in */; do
+        if [ -d "$d/.bare" ]; then
+            echo "$d"
+            for w in "$d"*/; do
+                [ -d "$w/.git" ] || continue
+                branch=$(cd "$w" && git branch --show-current)
+                echo "  ${w%/} → $branch"
+            done
+        fi
+    done
+
+# Show active branches per repo
+branches:
+    #!/usr/bin/env bash
+    set -eu
+    for d in */; do
+        if [ -d "$d/.bare" ]; then
+            echo "$d"
+            (cd "$d/.bare" && git branch -a --format='  %(refname:short)' | grep -v '^  origin/')
+        elif [ -d "$d/.git" ]; then
+            echo "$d"
+            (cd "$d" && git branch --format='  %(refname:short)')
+        fi
+    done
+
+# Fetch all repos
+fetch:
+    #!/usr/bin/env bash
+    set -eu
+    for d in */; do
+        if [ -d "$d/.bare" ]; then
+            echo "Fetching $d..."
+            (cd "$d/.bare" && git fetch --all --prune)
+        elif [ -d "$d/.git" ]; then
+            echo "Fetching $d..."
+            (cd "$d" && git fetch --all --prune)
+        fi
+    done
+
+# Pull default branches in all repos (skips dirty repos)
+pull:
+    #!/usr/bin/env bash
+    set -e
+    failed=()
+    for d in */; do
+        if [ -d "$d/.bare" ]; then
+            default=$(cd "$d/.bare" && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || default="main"
+            [ -z "$default" ] && default="main"
+            if [ -d "$d/$default" ]; then
+                if [ -n "$(cd "$d/$default" && git status -s)" ]; then
+                    echo "Skipping $d/$default (dirty)"
+                else
+                    echo "Pulling $d/$default..."
+                    (cd "$d/$default" && git pull) || failed+=("$d/$default")
+                fi
+            fi
+        elif [ -d "$d/.git" ]; then
+            if [ -n "$(cd "$d" && git status -s)" ]; then
+                echo "Skipping $d (dirty)"
+            else
+                echo "Pulling $d..."
+                (cd "$d" && git pull) || failed+=("$d")
+            fi
+        fi
+    done
+    if [ ${#failed[@]} -gt 0 ]; then
+        echo -e "\nFailed to pull:"
+        printf '  %s\n' "${failed[@]}"
+    fi
+
+# Convert legacy repo to bare+worktrees pattern
+convert repo:
+    ./scripts/convert-to-worktrees.sh {{repo}}
+
+# Show path to a repo's default worktree
+path repo:
+    #!/usr/bin/env bash
+    set -eu
+    if [ -d "{{repo}}/.bare" ]; then
+        default=$(cd "{{repo}}/.bare" && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || default="main"
+        [ -z "$default" ] && default="main"
+        echo "$(pwd)/{{repo}}/$default"
+    elif [ -d "{{repo}}/.git" ]; then
+        echo "$(pwd)/{{repo}}"
+    else
+        echo "Repo not found: {{repo}}" >&2
+        exit 1
+    fi
+
+# Find repos with unpushed commits
+unpushed:
+    #!/usr/bin/env bash
+    set -e
+    for d in */; do
+        if [ -d "$d/.bare" ]; then
+            for w in "$d"*/; do
+                [ -d "$w/.git" ] || continue
+                count=$(cd "$w" && git log @{u}.. --oneline 2>/dev/null | wc -l | tr -d ' ') || count=0
+                [ "$count" -gt 0 ] && echo "$w: $count unpushed commit(s)"
+            done
+        elif [ -d "$d/.git" ]; then
+            count=$(cd "$d" && git log @{u}.. --oneline 2>/dev/null | wc -l | tr -d ' ') || count=0
+            [ "$count" -gt 0 ] && echo "$d: $count unpushed commit(s)"
+        fi
+    done
+    true
